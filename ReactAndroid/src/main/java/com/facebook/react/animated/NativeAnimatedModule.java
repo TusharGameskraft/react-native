@@ -102,6 +102,81 @@ public class NativeAnimatedModule extends NativeAnimatedModuleSpec
     }
   }
 
+  private class ConcurrentOperationQueue {
+    private final Queue<UIThreadOperation> mQueue = new ConcurrentLinkedQueue<>();
+    @Nullable private UIThreadOperation mPeekedOperation = null;
+    private boolean mSynchronizedAccess = false;
+
+    @AnyThread
+    boolean isEmpty() {
+      return mQueue.isEmpty();
+    }
+
+    void setSynchronizedAccess(boolean isSynchronizedAccess) {
+      mSynchronizedAccess = isSynchronizedAccess;
+    }
+
+    @AnyThread
+    void add(UIThreadOperation operation) {
+      if (mSynchronizedAccess) {
+        synchronized (this) {
+          mQueue.add(operation);
+        }
+      } else {
+        mQueue.add(operation);
+      }
+    }
+
+    @UiThread
+    void executeBatch(long maxBatchNumber, NativeAnimatedNodesManager nodesManager) {
+
+      List<UIThreadOperation> operations;
+
+      if (mSynchronizedAccess) {
+        synchronized (this) {
+          operations = drainQueueIntoList(maxBatchNumber);
+        }
+      } else {
+        operations = drainQueueIntoList(maxBatchNumber);
+      }
+      for (UIThreadOperation operation : operations) {
+        operation.execute(nodesManager);
+      }
+    }
+
+    @UiThread
+    private List<UIThreadOperation> drainQueueIntoList(long maxBatchNumber) {
+      List<UIThreadOperation> operations = new ArrayList<>();
+      while (true) {
+        // Due to a race condition, we manually "carry-over" a polled item from previous batch
+        // instead of peeking the queue itself for consistency.
+        // TODO(T112522554): Clean up the queue access
+        if (mPeekedOperation != null) {
+          if (mPeekedOperation.getBatchNumber() > maxBatchNumber) {
+            break;
+          }
+          operations.add(mPeekedOperation);
+          mPeekedOperation = null;
+        }
+
+        UIThreadOperation polledOperation = mQueue.poll();
+        if (polledOperation == null) {
+          // This is the same as mQueue.isEmpty()
+          break;
+        }
+
+        if (polledOperation.getBatchNumber() > maxBatchNumber) {
+          // Because the operation is already retrieved from the queue, there's no way of placing it
+          // back as the head element, so we remember it manually here
+          mPeekedOperation = polledOperation;
+          break;
+        }
+        operations.add(polledOperation);
+      }
+
+      return operations;
+    }
+  }
   @NonNull private final GuardedFrameCallback mAnimatedFrameCallback;
   private final ReactChoreographer mReactChoreographer;
 
